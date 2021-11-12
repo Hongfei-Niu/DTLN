@@ -1,0 +1,9 @@
+librosa==0.8.1
+SoundFile==0.10.3.post1
+tensorflow==1.13.2
+numpy==1.16.0
+keras2onnx==1.7.0
+onnxruntime
+sounddevice==0.4.3
+tflite_runtime==2.5.0
+wavinfo==1.6.2

@@ -24,12 +24,13 @@ Version: 01.07.2020
 
 This code is licensed under the terms of the MIT-license.
 """
-
-
+import os
 import numpy as np
 import sounddevice as sd
+import soundfile as sf
 import tflite_runtime.interpreter as tflite
 import argparse
+import queue
 
 
 def int_or_str(text):
@@ -58,18 +59,20 @@ parser.add_argument(
 parser.add_argument(
     '-o', '--output-device', type=int_or_str,
     help='output device (numeric ID or substring)')
+parser.add_argument(
+    '-t', '--subtype', type=str, help='sound file subtype (e.g. "PCM_24")')
 
 parser.add_argument('--latency', type=float, help='latency in seconds', default=0.2)
 args = parser.parse_args(remaining)
 
 # set some parameters
-block_len_ms = 32 
+block_len_ms = 32
 block_shift_ms = 8
 fs_target = 16000
 # create the interpreters
-interpreter_1 = tflite.Interpreter(model_path='./pretrained_model/model_1.tflite')
+interpreter_1 = tflite.Interpreter(model_path='/Users/wz/PycharmProjects/AI_bot/chat_bot/DTLN/pretrained_model/model_1.tflite')
 interpreter_1.allocate_tensors()
-interpreter_2 = tflite.Interpreter(model_path='./pretrained_model/model_2.tflite')
+interpreter_2 = tflite.Interpreter(model_path='/Users/wz/PycharmProjects/AI_bot/chat_bot/DTLN/pretrained_model/model_2.tflite')
 interpreter_2.allocate_tensors()
 # Get input and output tensors.
 input_details_1 = interpreter_1.get_input_details()
@@ -86,12 +89,25 @@ block_len = int(np.round(fs_target * (block_len_ms / 1000)))
 in_buffer = np.zeros((block_len)).astype('float32')
 out_buffer = np.zeros((block_len)).astype('float32')
 
+i = queue.Queue()
+q = queue.Queue()
 
-def callback(indata, outdata, frames, time, status):
+
+def callback(indata, outdata=False, frames=False, time=False, status=False):
     # buffer and states to global
-    global in_buffer, out_buffer, states_1, states_2
-    if status:
-        print(status)
+    global in_buffer, out_buffer, states_1, states_2, output
+
+    i.put(indata[:].copy())
+    try:
+        output = np.concatenate([output, indata])
+        # print(indata.__len__())
+
+    except NameError as e:
+        print(e)
+        output = indata
+
+    # if status:
+        # print(status)
     # write to buffer
     in_buffer[:-block_shift] = in_buffer[block_shift:]
     in_buffer[-block_shift:] = np.squeeze(indata)
@@ -100,48 +116,75 @@ def callback(indata, outdata, frames, time, status):
     in_mag = np.abs(in_block_fft)
     in_phase = np.angle(in_block_fft)
     # reshape magnitude to input dimensions
-    in_mag = np.reshape(in_mag, (1,1,-1)).astype('float32')
+    in_mag = np.reshape(in_mag, (1, 1, -1)).astype('float32')
     # set tensors to the first model
     interpreter_1.set_tensor(input_details_1[1]['index'], states_1)
     interpreter_1.set_tensor(input_details_1[0]['index'], in_mag)
     # run calculation 
     interpreter_1.invoke()
     # get the output of the first block
-    out_mask = interpreter_1.get_tensor(output_details_1[0]['index']) 
-    states_1 = interpreter_1.get_tensor(output_details_1[1]['index'])   
+    out_mask = interpreter_1.get_tensor(output_details_1[0]['index'])
+    states_1 = interpreter_1.get_tensor(output_details_1[1]['index'])
     # calculate the ifft
     estimated_complex = in_mag * out_mask * np.exp(1j * in_phase)
     estimated_block = np.fft.irfft(estimated_complex)
     # reshape the time domain block
-    estimated_block = np.reshape(estimated_block, (1,1,-1)).astype('float32')
+    estimated_block = np.reshape(estimated_block, (1, 1, -1)).astype('float32')
     # set tensors to the second block
     interpreter_2.set_tensor(input_details_2[1]['index'], states_2)
     interpreter_2.set_tensor(input_details_2[0]['index'], estimated_block)
     # run calculation
     interpreter_2.invoke()
     # get output tensors
-    out_block = interpreter_2.get_tensor(output_details_2[0]['index']) 
-    states_2 = interpreter_2.get_tensor(output_details_2[1]['index']) 
+    out_block = interpreter_2.get_tensor(output_details_2[0]['index'])
+    states_2 = interpreter_2.get_tensor(output_details_2[1]['index'])
     # write to buffer
     out_buffer[:-block_shift] = out_buffer[block_shift:]
     out_buffer[-block_shift:] = np.zeros((block_shift))
-    out_buffer  += np.squeeze(out_block)
+    out_buffer += np.squeeze(out_block)
     # output to soundcard
-    outdata[:] = np.expand_dims(out_buffer[:block_shift], axis=-1)
-    
+    outdata = np.expand_dims(out_buffer[:block_shift], axis=-1)
+    q.put(outdata.copy())
+    return np.concatenate(outdata)
 
 
-try:
-    with sd.Stream(device=(args.input_device, args.output_device),
-                   samplerate=fs_target, blocksize=block_shift,
-                   dtype=np.float32, latency=args.latency,
-                   channels=1, callback=callback):
-        print('#' * 80)
-        print('press Return to quit')
-        print('#' * 80)
-        input()
-except KeyboardInterrupt:
-    parser.exit('')
-except Exception as e:
-    parser.exit(type(e).__name__ + ': ' + str(e))
-    
+def removeNoise(data):
+    assert not len(data) % block_shift, f'data dimension {data} not multiple of {block_shift}'
+    for i in range(0, len(data), 128):
+        tmp = callback(data[i: i + 128])
+
+        try:
+            output = np.concatenate([output, tmp])
+        except NameError:
+            output = tmp
+    return output
+
+if __name__ == '__main__':
+    try:
+        with sf.SoundFile('/Users/wz/PycharmProjects/AI_bot/chat_bot/recording.wav', mode='x', samplerate=16000,
+                          channels=1, subtype=args.subtype) as file1:
+            with sf.SoundFile('/Users/wz/PycharmProjects/AI_bot/chat_bot/dn_recording.wav', mode='x', samplerate=16000,
+                              channels=1, subtype=args.subtype) as file2:
+                with sd.Stream(device=(args.input_device, args.output_device),
+                               samplerate=fs_target, blocksize=block_shift,
+                               dtype=np.float32, latency=args.latency,
+                               channels=1, callback=callback):
+                    print('#' * 80)
+                    print('press Return to quit')
+                    print('#' * 80)
+                    while True:
+                        file1.write(i.get())
+                        file2.write(q.get())
+                    input()
+
+    except KeyboardInterrupt:
+        parser.exit('')
+    except Exception as e:
+        parser.exit(type(e).__name__ + ': ' + str(e))
+    finally:
+        file1.close()
+        file2.close()
+        import os
+        os.remove('/Users/wz/PycharmProjects/AI_bot/chat_bot/recording.wav')
+        os.remove('/Users/wz/PycharmProjects/AI_bot/chat_bot/dn_recording.wav')
+
