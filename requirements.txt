@@ -6,5 +6,5 @@ setuptools==58.3.0
 sounddevice==0.4.3
 SoundFile==0.10.3.post1
 tensorflow==1.13.1
-tflite_runtime==2.5.0
+# tflite_runtime==2.5.0
 wavinfo==1.6.2
