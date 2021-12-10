@@ -1,7 +1,6 @@
 keras2onnx==1.7.0
 numpy==1.16.0
 librosa==0.8.1
-onnxruntime==1.9.0
 setuptools>=58.3.0
 sounddevice==0.4.3
 SoundFile==0.10.3.post1
